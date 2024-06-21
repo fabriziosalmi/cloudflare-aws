@@ -9,6 +9,10 @@ CONFIG_FILE="aws_config.conf"
 VPC_ID=""
 SUBNET_IDS=""
 ALB_NAME=""
+SECURITY_GROUP_ID=""
+TARGET_GROUP_ARN=""
+CERTIFICATE_ARN=""
+CA_URI=""
 
 # Function to log info messages
 log_info() {
@@ -27,17 +31,21 @@ log_debug() {
 
 # Function to display usage information
 usage() {
-    echo "Usage: $0 [-c CONFIG_FILE] [-v VPC_ID] [-s SUBNET_IDS] [-n ALB_NAME]"
+    echo "Usage: $0 [-c CONFIG_FILE] [-v VPC_ID] [-s SUBNET_IDS] [-n ALB_NAME] [-g SECURITY_GROUP_ID] [-t TARGET_GROUP_ARN] [-l CERTIFICATE_ARN] [-u CA_URI]"
     exit 1
 }
 
 # Parse command-line arguments
-while getopts "c:v:s:n:" opt; do
+while getopts "c:v:s:n:g:t:l:u:" opt; do
     case $opt in
         c) CONFIG_FILE="$OPTARG" ;;
         v) VPC_ID="$OPTARG" ;;
         s) SUBNET_IDS="$OPTARG" ;;
         n) ALB_NAME="$OPTARG" ;;
+        g) SECURITY_GROUP_ID="$OPTARG" ;;
+        t) TARGET_GROUP_ARN="$OPTARG" ;;
+        l) CERTIFICATE_ARN="$OPTARG" ;;
+        u) CA_URI="$OPTARG" ;;
         *) usage ;;
     esac
 done
@@ -55,10 +63,14 @@ fi
 VPC_ID=${VPC_ID:-$(printenv VPC_ID)}
 SUBNET_IDS=${SUBNET_IDS:-$(printenv SUBNET_IDS)}
 ALB_NAME=${ALB_NAME:-$(printenv ALB_NAME)}
+SECURITY_GROUP_ID=${SECURITY_GROUP_ID:-$(printenv SECURITY_GROUP_ID)}
+TARGET_GROUP_ARN=${TARGET_GROUP_ARN:-$(printenv TARGET_GROUP_ARN)}
+CERTIFICATE_ARN=${CERTIFICATE_ARN:-$(printenv CERTIFICATE_ARN)}
+CA_URI=${CA_URI:-$(printenv CA_URI)}
 
 # Ensure required variables are set
-if [ -z "$VPC_ID" ] || [ -z "$SUBNET_IDS" ] || [ -z "$ALB_NAME" ]; then
-    log_error "VPC_ID, SUBNET_IDS, and ALB_NAME must be set. Use -v, -s, and -n to provide them or set them in the environment/config file."
+if [ -z "$VPC_ID" ] || [ -z "$SUBNET_IDS" ] || [ -z "$ALB_NAME" ] || [ -z "$SECURITY_GROUP_ID" ] || [ -z "$TARGET_GROUP_ARN" ] || [ -z "$CERTIFICATE_ARN" ] || [ -z "$CA_URI" ]; then
+    log_error "VPC_ID, SUBNET_IDS, ALB_NAME, SECURITY_GROUP_ID, TARGET_GROUP_ARN, CERTIFICATE_ARN, and CA_URI must be set. Use the respective options or environment variables to provide them."
     usage
 fi
 
@@ -77,6 +89,42 @@ if [ $? -eq 0 ]; then
     log_info "ALB ARN: $ALB_ARN"
 else
     log_error "Failed to create ALB: $ALB_NAME"
+    exit 1
+fi
+
+# Create the listener
+log_info "Creating listener for ALB: $ALB_ARN on port: 443"
+LISTENER_ARN=$(aws elbv2 create-listener \
+    --load-balancer-arn "$ALB_ARN" \
+    --protocol HTTPS \
+    --port 443 \
+    --certificates CertificateArn=$CERTIFICATE_ARN \
+    --default-actions Type=forward,TargetGroupArn=$TARGET_GROUP_ARN \
+    --ssl-policy ELBSecurityPolicy-TLS-1-2-2017-01 \
+    --output json | jq -r '.Listeners[0].ListenerArn')
+
+if [ $? -eq 0 ]; then
+    log_info "Successfully created listener on port: 443"
+    log_info "Listener ARN: $LISTENER_ARN"
+else
+    log_error "Failed to create listener for ALB: $ALB_ARN on port: 443"
+    exit 1
+fi
+
+# Configure mTLS for the listener
+log_info "Configuring mTLS for listener: $LISTENER_ARN"
+aws elbv2 modify-listener \
+    --listener-arn "$LISTENER_ARN" \
+    --ssl-policy ELBSecurityPolicy-FS-1-2-Res-2019-08 \
+    --certificates CertificateArn=$CERTIFICATE_ARN \
+    --default-actions Type=forward,TargetGroupArn=$TARGET_GROUP_ARN \
+    --mutual-authentication PolicyName="mTLS-Policy",TrustStoreUri=$CA_URI \
+    --output json
+
+if [ $? -eq 0 ]; then
+    log_info "Successfully configured mTLS for listener: $LISTENER_ARN"
+else
+    log_error "Failed to configure mTLS for listener: $LISTENER_ARN"
     exit 1
 fi
 

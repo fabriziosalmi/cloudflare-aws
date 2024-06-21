@@ -1,135 +1,89 @@
 #!/bin/bash
 
-# Define log files
-LOGFILE="acm_validation_log.txt"
-DEBUG_LOGFILE="acm_validation_debug_log.txt"
-
-# Default configuration values
-CONFIG_FILE="aws_config.conf"
+# Load configuration
+CONFIG_FILE="config/aws_config.conf"
 DOMAIN_NAME=""
 CF_HOSTNAME=""
 ZONEID=""
 BEARER_TOKEN=""
 
-# Function to log info messages
-log_info() {
-    echo "$(date +"%Y-%m-%d %H:%M:%S") [INFO] $1" | tee -a $LOGFILE
-}
-
-# Function to log error messages
-log_error() {
-    echo "$(date +"%Y-%m-%d %H:%M:%S") [ERROR] $1" | tee -a $LOGFILE
-}
-
-# Function to log debug messages
-log_debug() {
-    echo "$(date +"%Y-%m-%d %H:%M:%S") [DEBUG] $1" >> $DEBUG_LOGFILE
-}
-
-# Function to display usage information
-usage() {
-    echo "Usage: $0 [-c CONFIG_FILE] [-d DOMAIN_NAME] [-h CF_HOSTNAME] [-z ZONEID] [-t BEARER_TOKEN]"
-    exit 1
-}
-
-# Parse command-line arguments
 while getopts "c:d:h:z:t:" opt; do
-    case $opt in
-        c) CONFIG_FILE="$OPTARG" ;;
-        d) DOMAIN_NAME="$OPTARG" ;;
-        h) CF_HOSTNAME="$OPTARG" ;;
-        z) ZONEID="$OPTARG" ;;
-        t) BEARER_TOKEN="$OPTARG" ;;
-        *) usage ;;
-    esac
+  case ${opt} in
+    c) CONFIG_FILE=$OPTARG ;;
+    d) DOMAIN_NAME=$OPTARG ;;
+    h) CF_HOSTNAME=$OPTARG ;;
+    z) ZONEID=$OPTARG ;;
+    t) BEARER_TOKEN=$OPTARG ;;
+    \?) echo "Usage: $0 [-c CONFIG_FILE] [-d DOMAIN_NAME] [-h CF_HOSTNAME] [-z ZONEID] [-t BEARER_TOKEN]"
+        exit 1 ;;
+  esac
 done
-shift $((OPTIND-1))
 
-# Load configuration from file if it exists
-if [ -f $CONFIG_FILE ]; then
-    . $CONFIG_FILE
-    log_info "Loaded configuration from $CONFIG_FILE."
-else
-    log_info "Configuration file $CONFIG_FILE not found. Using defaults and environment variables."
-fi
+source $CONFIG_FILE
 
-# Check if required variables are set, either by command-line arguments, environment variables, or config file
-DOMAIN_NAME=${DOMAIN_NAME:-$(printenv DOMAIN_NAME)}
-CF_HOSTNAME=${CF_HOSTNAME:-$(printenv CF_HOSTNAME)}
-ZONEID=${ZONEID:-$(printenv ZONEID)}
-BEARER_TOKEN=${BEARER_TOKEN:-$(printenv BEARER_TOKEN)}
-
-# Ensure required variables are set
+# Validate required parameters
 if [ -z "$DOMAIN_NAME" ] || [ -z "$CF_HOSTNAME" ] || [ -z "$ZONEID" ] || [ -z "$BEARER_TOKEN" ]; then
-    log_error "DOMAIN_NAME, CF_HOSTNAME, ZONEID, and BEARER_TOKEN must be set. Use the respective options or environment variables to provide them."
-    usage
+  echo "DOMAIN_NAME, CF_HOSTNAME, ZONEID, and BEARER_TOKEN are required parameters."
+  exit 1
 fi
 
-# Request ACM certificate
-log_info "Requesting ACM certificate for domain: $DOMAIN_NAME"
+# Logging setup
+LOGFILE="logs/validate_acm_certificate.log"
+mkdir -p logs
+
+log() {
+  echo "$(date +"%Y-%m-%d %H:%M:%S") [INFO] $1" | tee -a $LOGFILE
+}
+
+error() {
+  echo "$(date +"%Y-%m-%d %H:%M:%S") [ERROR] $1" | tee -a $LOGFILE >&2
+  exit 1
+}
+
+log "Requesting ACM certificate for domain $DOMAIN_NAME..."
+
 CERTIFICATE_ARN=$(aws acm request-certificate \
-    --domain-name "$DOMAIN_NAME" \
+    --domain-name $DOMAIN_NAME \
     --validation-method DNS \
-    --output json | jq -r '.CertificateArn')
+    --query 'CertificateArn' \
+    --output text) || error "Failed to request ACM certificate"
 
-if [ $? -eq 0 ]; then
-    log_info "Successfully requested ACM certificate for domain: $DOMAIN_NAME"
-    log_info "Certificate ARN: $CERTIFICATE_ARN"
-else
-    log_error "Failed to request ACM certificate for domain: $DOMAIN_NAME"
-    exit 1
-fi
+log "Certificate requested successfully: $CERTIFICATE_ARN"
 
-# Retrieve DNS validation details
-log_info "Retrieving DNS validation details for certificate: $CERTIFICATE_ARN"
-DNS_RECORDS=$(aws acm describe-certificate \
-    --certificate-arn "$CERTIFICATE_ARN" \
-    --output json | jq -r '.Certificate.DomainValidationOptions[] | select(.DomainName == "'"$DOMAIN_NAME"'") | .ResourceRecord')
+log "Fetching DNS validation record from ACM..."
 
-if [ $? -eq 0 ]; then
-    log_info "Successfully retrieved DNS validation details for certificate: $CERTIFICATE_ARN"
-else
-    log_error "Failed to retrieve DNS validation details for certificate: $CERTIFICATE_ARN"
-    exit 1
-fi
+VALIDATION_OPTIONS=$(aws acm describe-certificate \
+    --certificate-arn $CERTIFICATE_ARN \
+    --query 'Certificate.DomainValidationOptions[0].ResourceRecord' \
+    --output json) || error "Failed to fetch DNS validation record"
 
-# Extract DNS record name and value
-DNS_NAME=$(echo "$DNS_RECORDS" | jq -r '.Name')
-DNS_VALUE=$(echo "$DNS_RECORDS" | jq -r '.Value')
+log "Adding DNS validation record to Cloudflare..."
 
-# Create DNS TXT record in Cloudflare
-log_info "Creating DNS TXT record in Cloudflare for validation"
-curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONEID/dns_records" \
+RECORD_NAME=$(echo $VALIDATION_OPTIONS | jq -r '.Name')
+RECORD_VALUE=$(echo $VALIDATION_OPTIONS | jq -r '.Value')
+RECORD_TYPE=$(echo $VALIDATION_OPTIONS | jq -r '.Type')
+
+ADD_RECORD_RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONEID/dns_records" \
     -H "Authorization: Bearer $BEARER_TOKEN" \
     -H "Content-Type: application/json" \
-    --data '{
-        "type": "TXT",
-        "name": "'"$DNS_NAME"'",
-        "content": "'"$DNS_VALUE"'",
-        "ttl": 120
-    }' | jq .
+    --data "{\"type\":\"$RECORD_TYPE\",\"name\":\"$RECORD_NAME\",\"content\":\"$RECORD_VALUE\",\"ttl\":120}")
 
-if [ $? -eq 0 ]; then
-    log_info "Successfully created DNS TXT record in Cloudflare for validation"
+if echo $ADD_RECORD_RESPONSE | grep -q "\"success\":true"; then
+  log "DNS validation record added successfully to Cloudflare."
 else
-    log_error "Failed to create DNS TXT record in Cloudflare for validation"
-    exit 1
+  error "Failed to add DNS validation record to Cloudflare: $ADD_RECORD_RESPONSE"
 fi
 
-log_info "Waiting for DNS validation..."
-sleep 60  # Wait for DNS propagation
+log "Waiting for certificate validation..."
 
-# Check certificate status
-log_info "Checking certificate validation status"
-CERT_STATUS=$(aws acm describe-certificate \
-    --certificate-arn "$CERTIFICATE_ARN" \
-    --output json | jq -r '.Certificate.Status')
+VALIDATION_STATUS="PENDING_VALIDATION"
+while [ "$VALIDATION_STATUS" != "SUCCESS" ]; do
+  VALIDATION_STATUS=$(aws acm describe-certificate \
+      --certificate-arn $CERTIFICATE_ARN \
+      --query 'Certificate.DomainValidationOptions[0].ValidationStatus' \
+      --output text)
+  log "Current validation status: $VALIDATION_STATUS"
+  sleep 30
+done
 
-if [ "$CERT_STATUS" == "ISSUED" ]; then
-    log_info "Certificate validated and issued successfully"
-else
-    log_error "Certificate validation failed or still pending. Current status: $CERT_STATUS"
-    exit 1
-fi
-
-log_info "Script completed successfully."
+log "Certificate validated successfully: $CERTIFICATE_ARN"

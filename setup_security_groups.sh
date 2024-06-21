@@ -68,4 +68,26 @@ SECURITY_GROUP_ID=$(aws ec2 create-security-group \
     --output json | jq -r '.GroupId')
 
 if [ $? -eq 0 ]; then
-    log_info "Successfully crea
+    log_info "Successfully created security group: $SECURITY_GROUP_NAME"
+    log_info "Security Group ID: $SECURITY_GROUP_ID"
+else
+    log_error "Failed to create security group: $SECURITY_GROUP_NAME"
+    exit 1
+fi
+
+# Authorize inbound rules (customize as needed)
+log_info "Authorizing inbound rules for security group: $SECURITY_GROUP_NAME"
+aws ec2 authorize-security-group-ingress \
+    --group-id "$SECURITY_GROUP_ID" \
+    --protocol tcp \
+    --port 443 \
+    --cidr 0.0.0.0/0
+
+if [ $? -eq 0 ]; then
+    log_info "Successfully authorized inbound rules for security group: $SECURITY_GROUP_NAME"
+else
+    log_error "Failed to authorize inbound rules for security group: $SECURITY_GROUP_NAME"
+    exit 1
+fi
+
+log_info "Script completed successfully."

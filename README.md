@@ -1,8 +1,4 @@
-# Cloudflare and AWS mTLS Management Scripts
-
-This repository contains a set of Bash scripts designed to manage certificates for Cloudflare's Origin CA, TLS client authentication, and setting up mTLS with AWS Application Load Balancer (ALB).
-
-## Scripts Overview
+# Cloudflare and AWS 
 
 ### Cloudflare Scripts
 
